@@ -1,0 +1,182 @@
+import getpass
+import os
+
+def _set_env(var: str):
+    if not os.environ.get(var):
+        os.environ[var] = getpass.getpass(f"{var}: ")
+
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env file
+load_dotenv()
+
+tavily_api_key = os.getenv("TAVILY_API_KEY")
+openai_api_key = os.getenv("OPENAI_API_KEY")
+
+ 
+
+
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(model_name="gpt-4o")
+
+
+from typing import Literal
+from typing_extensions import TypedDict
+from langgraph.graph import MessagesState, START, END
+from langgraph.types import Command
+
+# Define available agents
+members = ["web_researcher", "rag", "nl2sql"]
+# Add FINISH as an option for task completion
+options = members + ["FINISH"]
+
+# Create system prompt for supervisor
+system_prompt = (
+    "You are a supervisor tasked with managing a conversation between the"
+    f" following workers: {members}. Given the following user request,"
+    " respond with the worker to act next. Each worker will perform a"
+    " task and respond with their results and status. When finished,"
+    " respond with FINISH."
+)
+
+# Define router type for structured output
+class Router(TypedDict):
+    """Worker to route to next. If no workers needed, route to FINISH."""
+    next: Literal["web_researcher", "rag", "nl2sql", "FINISH"]
+
+# Create supervisor node function
+def supervisor_node(state: MessagesState) -> Command[Literal["web_researcher", "rag", "nl2sql", "__end__"]]:
+    messages = [
+        {"role": "system", "content": system_prompt},
+    ] + state["messages"]
+    response = llm.with_structured_output(Router).invoke(messages)
+    goto = response["next"]
+    print(f"Next Worker: {goto}")
+    if goto == "FINISH":
+        goto = END
+    return Command(goto=goto)
+
+
+
+#First, let's define our custom create_agent function:
+class AgentState(TypedDict):
+    """The state of the agent."""
+    messages: Annotated[Sequence[BaseMessage], add_messages]
+
+def create_agent(llm, tools):
+    llm_with_tools = llm.bind_tools(tools)
+    def chatbot(state: AgentState):
+        return {"messages": [llm_with_tools.invoke(state["messages"])]}
+
+    graph_builder = StateGraph(AgentState)
+    graph_builder.add_node("agent", chatbot)
+
+    tool_node = ToolNode(tools=tools)
+    graph_builder.add_node("tools", tool_node)
+
+    graph_builder.add_conditional_edges(
+        "agent",
+        tools_condition,
+    )
+    graph_builder.add_edge("tools", "agent")
+    graph_builder.set_entry_point("agent")
+    return graph_builder.compile()
+
+
+
+#Web Research Agent
+
+websearch_agent = create_agent(llm, [web_search_tool])
+
+def web_research_node(state: MessagesState) -> Command[Literal["supervisor"]]:
+    result = websearch_agent.invoke(state)
+    return Command(
+        update={
+            "messages": [
+                HumanMessage(content=result["messages"][-1].content, name="web_researcher")
+            ]
+        },
+        goto="supervisor",
+    )
+
+
+#RAG Agent
+rag_agent = create_agent(llm, [retriever_tool])
+
+def rag_node(state: MessagesState) -> Command[Literal["supervisor"]]:
+    result = rag_agent.invoke(state)
+    return Command(
+        update={
+            "messages": [
+                HumanMessage(content=result["messages"][-1].content, name="rag")
+            ]
+        },
+        goto="supervisor",
+    )
+
+\
+
+#NL2SQL Agent
+
+nl2sql_agent = create_agent(llm, [nl2sql_tool])
+
+def nl2sql_node(state: MessagesState) -> Command[Literal["supervisor"]]:
+    result = nl2sql_agent.invoke(state)
+    return Command(
+        update={
+            "messages": [
+                HumanMessage(content=result["messages"][-1].content, name="nl2sql")
+            ]
+        },
+        goto="supervisor",
+    )
+
+
+
+nl2sql_agent = create_agent(llm, [nl2sql_tool])
+
+def nl2sql_node(state: MessagesState) -> Command[Literal["supervisor"]]:
+    result = nl2sql_agent.invoke(state)
+    return Command(
+        update={
+            "messages": [
+                HumanMessage(content=result["messages"][-1].content, name="nl2sql")
+            ]
+        },
+        goto="supervisor",
+    )
+
+
+
+builder = StateGraph(MessagesState)
+builder.add_edge(START, "supervisor")
+builder.add_node("supervisor", supervisor_node)
+builder.add_node("web_researcher", web_research_node)
+builder.add_node("rag", rag_node)
+builder.add_node("nl2sql", nl2sql_node)
+graph = builder.compile()
+
+
+#Visualizing the LangGraph
+
+
+from IPython.display import Image, display
+
+try:
+    display(Image(graph.get_graph().draw_mermaid_png()))
+except Exception:
+    # You can put your exception handling code here
+    pass
+
+
+# Testing the System
+# Example: Complex Query Using Multiple Agents
+input_question = "Find the founder of FutureSmart AI and then do a web research on him"
+for s in graph.stream(
+    {"messages": [("user", input_question)]}, 
+    subgraphs=True
+):
+    print(s)
+    print("----")
